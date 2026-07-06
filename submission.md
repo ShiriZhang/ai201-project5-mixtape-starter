@@ -95,4 +95,43 @@ today.weekday() != 6. Python's datetime.weekday() returns 6 for Sunday (Monday=0
 Removed the `and today.weekday() != 6` clause, so the branch is simply
 `elif days_since_last == 1:`. Ran `pytest tests/test_streaks.py -v` — all 5 tests pass, including `test_streak_increments_on_sunday`. Also ran the full suite (`pytest tests/ -v`) to confirm the change didn't affect the "same day" (no double count) or "skipped day" (reset) tests, which still pass unchanged.
 
-<!-- 每修一个bug复制一份上面这个模板 -->
+### Issue #4: I got notified when a friend added my song to a playlist but not when they rated it
+
+**How I reproduced it:**
+
+Wrote `tests/repro_issue4.py`, a standalone script using an in-memory SQLite database (`create_app({"TESTING": True, "SQLALCHEMY_DATABASE_URI": "sqlite:///:memory:"})`). Created two users (a song sharer and a rater) and one song shared by the first user. Called `notification_service.get_notifications(sharer.id)` before and after calling `notification_service.rate_song(rater.id, song.id, 5)`.
+
+The notification list was identical before and after the rating — confirming that rating a song produces no notification for the person who shared it, even though the two are different users.
+
+**How I found the root cause:**
+
+I opened `services/notification_service.py`, since that's the file the README attributes this issue to. I compared `rate_song` against `add_to_playlist` in the same file — the brief's hint pointed out that Issue #4's cause is architectural, so I looked for a structural difference between a notification path that works and one that doesn't. `add_to_playlist` ends with:
+
+```python
+if song.shared_by != added_by_user_id:
+    create_notification(
+        user_id=song.shared_by,
+        notification_type="song_added_to_playlist",
+        body=f"{adder.username} added your song '{song.title}' to the playlist '{playlist.name}'.",
+    )
+```
+
+`rate_song` has no equivalent block — it validates the score, creates/updates the `Rating` row, commits, and returns. It never calls `create_notification` at all, despite living in the same file whose module docstring says "Notifications are generated when friends interact with a user's shared songs."
+
+**The root cause:**
+`rate_song` is missing a call to `create_notification`. The notification-creation mechanism itself works fine (proven by `add_to_playlist`'s working example) — it just was never wired up for the "rate a song" interaction. So rating someone else's shared song silently updates the `Rating` table but never notifies the original sharer, even though adding that same song to a playlist does.
+
+**My fix and side-effect check:**
+Added a call to `create_notification` at the end of `rate_song`, mirroring
+`add_to_playlist`'s pattern exactly — notifying `song.shared_by` with a `song_rated` notification, guarded by `if song.shared_by != user_id` so a user rating their own shared song doesn't notify themselves:
+
+```python
+if song.shared_by != user_id:
+    create_notification(
+        user_id=song.shared_by,
+        notification_type="song_rated",
+        body=f"{rater.username} rated your song '{song.title}' with {score}/5.",
+    )
+```
+
+Re-ran `repro_issue4.py` — the sharer's notification list now contains a new song_rated entry after rating. Ran the full test suite (`pytest tests/ -v`): all `test_streaks.py` and `test_search.py` tests still pass (13 total minus 2 pre-existing, unrelated `test_playlists.py` failures tied to the separate Issue #5, not touched by this change) — confirming this fix didn't affect streak or search behavior.
