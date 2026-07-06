@@ -1,7 +1,22 @@
 # Mixtape Bug Hunt — Submission
 
 ## AI Usage
-_(填在最后，milestone 4再回来写)_
+
+I used an AI assistant (Claude) throughout this project as a mentor/pair — it explained code, suggested reproduction scripts, and helped me think through root causes, but I ran every command, wrote the actual code changes, and verified every claim myself before trusting it. Some specific places this mattered:
+
+**Codebase orientation.** I gave the AI the contents of each service file and asked it to summarize responsibilities and trace the "rate a song" call chain. The Codebase Map section above started from that AI-generated summary; I read through it against the actual source files, confirmed the details (e.g. checked `playlist_entries`'s extra columns myself), and kept it largely as drafted since it matched what I verified.
+
+**Root cause explanations, given directly.** For Issue #1, after reading `update_listening_streak` myself and getting stuck on why Sunday behaved differently, I asked the AI to just explain the bug outright rather than guide me further. It correctly identified that `today.weekday() != 6` incorrectly excludes Sundays from the increment branch. For Issue #4, I asked the AI to show its analysis and proposed fix directly (adding a `create_notification` call mirroring `add_to_playlist`'s pattern) rather than deriving it myself, since I already understood the asymmetry but wasn't sure how to write the fix.
+
+**Wrong AI hypotheses that I disproved by testing — this was the most important lesson.**
+For both Issue #2 and Issue #3, the AI's first theory turned out to be wrong, and I only
+found that out by actually running the reproduction scripts:
+- For Issue #3, the AI initially assumed the unused `outerjoin` to `song_tags` would make a 3-tag song appear 3 times in search results. I tested this three separate ways (isolated data, real seed data, an explicit `.count()` vs `.all()` check) and every test showed no visible duplication — the AI's theory was contradicted by my own results, which is what led us to dig into *why* (SQLAlchemy's ORM deduplicates by primary key) instead of just accepting the first explanation.
+- For Issue #2, the AI's first theory was a boundary/off-by-one bug in the 24-hour filter (similar to Issue #1). I tested the exact boundary (23h59m vs 24h01m) and it was correct every time — that theory was also wrong. The real cause (the 24-hour threshold itself being too generous, per `seed_data.py`'s own "30 minutes" framing) only came out after I pushed back on the AI's earlier attempts and we re-read the seed data comments together.
+
+**Debugging my own scripts.** When my reproduction scripts errored (missing `User` foreign key for `Song.shared_by`, running database code outside `app.app_context()`), I asked the AI to explain the tracebacks rather than just paste a fix — I made the corrections myself once I understood what each error meant.
+
+**Where I did not just trust AI output:** I re-ran every test the AI suggested myself and only accepted a root cause once I had actual failing/passing test output in front of me, not just a plausible-sounding explanation. The RCA entries above describe what I personally verified, not what the AI initially guessed.
 
 
 ## Codebase Map
@@ -135,6 +150,9 @@ if song.shared_by != user_id:
 ```
 
 Re-ran `repro_issue4.py` — the sharer's notification list now contains a new song_rated entry after rating. Ran the full test suite (`pytest tests/ -v`): all `test_streaks.py` and `test_search.py` tests still pass (13 total minus 2 pre-existing, unrelated `test_playlists.py` failures tied to the separate Issue #5, not touched by this change) — confirming this fix didn't affect streak or search behavior.
+
+Also wrote a regression test in `tests/test_notifications.py` (`test_rating_a_song_notifies_the_sharer` and `test_rating_your_own_song_does_not_notify_yourself`) that would have caught this bug before it was introduced — it fails against the pre-fix code (no `create_notification` call) and passes after.
+
 
 ### Issue #5: The last song in a playlist never shows up
 
