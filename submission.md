@@ -135,3 +135,30 @@ if song.shared_by != user_id:
 ```
 
 Re-ran `repro_issue4.py` — the sharer's notification list now contains a new song_rated entry after rating. Ran the full test suite (`pytest tests/ -v`): all `test_streaks.py` and `test_search.py` tests still pass (13 total minus 2 pre-existing, unrelated `test_playlists.py` failures tied to the separate Issue #5, not touched by this change) — confirming this fix didn't affect streak or search behavior.
+
+### Issue #5: The last song in a playlist never shows up
+
+**How I reproduced it:**
+
+Wrote `tests/repro_issue5.py`: created a playlist with 3 songs (via direct inserts into `playlist_entries` with `position` 1, 2, 3), then called `get_playlist_songs(playlist.id)`.
+
+
+Song 3 (the one with the highest `position`) was missing. I also tested the boundary case of a playlist with exactly 1 song — before the fix, `get_playlist_songs()` returned **0** songs for it, which is an even clearer symptom of the same bug.
+
+**How I found the root cause:**
+
+The existing test suite already had `tests/test_playlists.py::test_playlist_returns_all_songs`, which fails with `assert len(songs) == 5` where actual was 4, and its own comment reads
+`# Bug causes this to return 4`. That pointed me straight at
+`services/playlist_service.py`'s `get_playlist_songs`. Reading it line by line, the query builds `songs` ordered ascending by `position`, then the return statement is:
+
+```python
+return [song.to_dict() for song in songs[:-1]]
+```
+`songs[:-1]` is a Python slice that returns every element except the last one.
+
+**The root cause:**
+`get_playlist_songs` queries all of a playlist's songs correctly, ordered by `position`, but then slices the result with `[:-1]` before returning — unconditionally dropping the last song in the ordered list. Since the list is sorted ascending by `position`, the "last" element is always the song with the highest position, i.e. the most recently added one at the end of the playlist. This directly contradicts the function's own docstring, which says "Note: This function returns all songs in the playlist." For a playlist with only 1 song, this slice returns an empty list instead of that one song.
+
+**My fix and side-effect check:**
+Changed the return statement to `return [song.to_dict() for song in songs]`, removing the slice entirely. Verified with `repro_issue5.py`: a 3-song playlist now returns all 3 songs, and the 1-song boundary case now correctly returns 1 song (not 0). Ran the full test suite (`pytest tests/ -v`) — all 13 tests pass, including the two previously-failing
+`test_playlists.py` tests (test_playlist_returns_all_songs, test_playlist_returns_songs_in_order), with no regressions in streak or search tests.

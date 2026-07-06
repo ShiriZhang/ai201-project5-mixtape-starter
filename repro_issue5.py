@@ -19,7 +19,8 @@ with app.app_context():
 
     songs = [
         Song(title=f"Song {i}", artist="Artist", shared_by=user.id)
-        for i in range(1, 4)  # 3首歌
+        for i in range(1, 2) # 2 songs
+        # for i in range(1, 4)  # 3 songs
     ]
     db.session.add_all(songs)
     db.session.flush()
