@@ -162,3 +162,43 @@ return [song.to_dict() for song in songs[:-1]]
 **My fix and side-effect check:**
 Changed the return statement to `return [song.to_dict() for song in songs]`, removing the slice entirely. Verified with `repro_issue5.py`: a 3-song playlist now returns all 3 songs, and the 1-song boundary case now correctly returns 1 song (not 0). Ran the full test suite (`pytest tests/ -v`) — all 13 tests pass, including the two previously-failing
 `test_playlists.py` tests (test_playlist_returns_all_songs, test_playlist_returns_songs_in_order), with no regressions in streak or search tests.
+
+### Issue #3: The same song keeps showing up twice in search
+
+**How I reproduced it:**
+
+Wrote `tests/repro_issue3.py`: created songs with 0, 1, and 3 tags in both an in-memory test database and against the real seeded `mixtape.db`, then called `search_songs()` with a query matching a 3-tag song. In every attempt, the returned list contained exactly one entry for that song — no visible duplicate.
+
+However, `db.session.query(Song).outerjoin(song_tags, Song.id == song_tags.c.song_id).filter(...)` does produce row fan-out at the SQL level: for a song with 3 tags, `.count()` on that query returned 4 (1 row per matching `song_tags` row, plus other matching songs), while `.all()` returned only 2 mapped objects. This confirmed the join was multiplying rows at
+the SQL level, but SQLAlchemy's legacy `Query.all()` automatically deduplicates mapped entities by primary key, which silently absorbed the duplication before it reached `search_songs()`'s return value in this environment.
+
+**How I found the root cause:**
+
+I initially assumed a 3-tag song would appear 3 times in the results and tried to reproduce that directly — it never did, across three separate attempts (isolated test data, real seed data, and an exact 24-hour-style boundary check adapted for this issue). That led me to read `tests/test_search.py`, which already contains `test_search_no_duplicates_multi_tag_song`, whose own comment says:
+`assert len(matching) == 1  # Should be 1, bug causes it to be 3`. This is the test author's own description of the intended bug, and it was already passing — meaning the duplication described by the bug wasn't actually happening in this environment. That pushed me to check the SQL layer directly with `.count()` vs `.all()`, which is where I found the real discrepancy (4 vs 2).
+
+**The root cause:**
+
+`search_songs()` in `services/search_service.py` joins `Song` to `song_tags` via `.outerjoin(song_tags, Song.id == song_tags.c.song_id)`, but the `WHERE` clause only filters on `Song.title` and `Song.artist` — the join is never used for filtering or selecting tag data. Its only effect is that a song with N tags produces N matching rows at the SQL level for a single logical song. In this project's installed SQLAlchemy version, the legacy `Query.all()` API happens to deduplicate mapped entities by primary key automatically, so the visible symptom (duplicate dicts in the returned list) doesn't currently manifest. But the underlying defect — an unnecessary join that multiplies rows per tag with no filtering purpose — is real and fragile: it depends entirely on an ORM convenience behavior rather than the query itself being correct, and would produce actual duplicates under a different query execution style (e.g. SQLAlchemy 2.0-style `select()` execution, which does not auto-deduplicate unless `.unique()` is called explicitly).
+
+**My fix and side-effect check:**
+
+Removed the unnecessary `.outerjoin(song_tags, ...)` entirely, since it was never used to
+filter or select anything:
+
+```python
+def search_songs(query: str) -> list[dict]:
+    results = (
+        db.session.query(Song)
+        .filter(
+            db.or_(
+                Song.title.ilike(f"%{query}%"),
+                Song.artist.ilike(f"%{query}%"),
+            )
+        )
+        .all()
+    )
+    return [song.to_dict() for song in results]
+```
+
+Verified with `repro_issue3.py` that `.count()` and `len(.all())` are now both 1 for a 3-tag song match — the row-multiplication risk is eliminated at the SQL level, not just masked by ORM deduplication. Ran the full test suite (pytest tests/ -v): all tests pass, including the three `test_search_no_duplicates_*` tests and the unrelated streak/playlist tests, confirming no regressions.

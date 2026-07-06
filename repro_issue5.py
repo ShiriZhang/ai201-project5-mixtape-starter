@@ -1,4 +1,4 @@
-"""repro_issue5.py — 验证 Issue #5"""
+"""repro_issue5.py — verify Issue #5"""
 
 from app import create_app, db
 from models import User, Song, Playlist, playlist_entries
@@ -37,6 +37,6 @@ with app.app_context():
     db.session.commit()
 
     result = get_playlist_songs(playlist.id)
-    print(f"playlist里放了 {len(songs)} 首歌，get_playlist_songs() 返回了 {len(result)} 条:")
+    print(f"Playlist has {len(songs)} songs, get_playlist_songs() returned {len(result)}:")
     for r in result:
         print(f"  - {r['title']}")
