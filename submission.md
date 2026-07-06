@@ -202,3 +202,49 @@ def search_songs(query: str) -> list[dict]:
 ```
 
 Verified with `repro_issue3.py` that `.count()` and `len(.all())` are now both 1 for a 3-tag song match — the row-multiplication risk is eliminated at the SQL level, not just masked by ORM deduplication. Ran the full test suite (pytest tests/ -v): all tests pass, including the three `test_search_no_duplicates_*` tests and the unrelated streak/playlist tests, confirming no regressions.
+
+### Issue #2: Friends Listening Now shows people from yesterday
+
+**How I reproduced it:**
+
+My first few attempts assumed the bug was a boundary/off-by-one error in the 24-hour
+filter itself (similar to Issue #1's Sunday boundary), and tested events at 2h/48h and
+23h59m/24h01m relative to `now`, both isolated and against the real seeded `mixtape.db`.
+All of these showed *correct* filtering — events past 24 hours were reliably excluded.
+
+The actual reproduction came from re-reading `seed_data.py`'s comments, which frame the
+intended behavior differently than I'd assumed:
+
+```python
+# Recent events (within the past 30 minutes) — should appear in "listening now"
+...
+# Older events (1–14 days ago) — should NOT appear in "listening now" after fix
+```
+This drew the "should show" / "should not show" line at 30 minutes, not 24 hours. I wrote `tests/repro_issue2.py` created a friend with a single ListeningEvent timestamped 10 hours ago (well under the current 24-hour threshold, and with no more-recent event to mask it).
+
+Calling get_friends_listening_now(me.id) returned that friend:
+
+```
+Returned 1 result(s):
+  - friend=friend, listened_at=2026-07-06T11:23:18.482368
+```
+
+A listen from 10 hours ago being labeled "currently listening" is exactly the "shows people from yesterday" symptom described in the issue.
+
+**How I found the root cause:**
+
+I initially focused on whether the 24-hour comparison (`ListeningEvent.listened_at >= cutoff`) was implemented correctly, and rigorously proved it was — the filter itself has no logic error at any boundary I tested. That ruled out a comparison-operator bug. What made every one of those tests look "correct" was that in the seeded data, every friend who had an older (2–58 hour) event also happened to have a separate, more-recent event that won the per-friend dedup step — so the older event was always hidden regardless of whether the filter was "right." Reproducing the bug required constructing a friend with only an old-but-under-24-hour event and no masking recent event, which the existing seed data never isolated. Once I did that, and cross-referenced `seed_data.py`'s own "30 minutes" framing, it became clear the defect isn't in the comparison logic — it's in the threshold value itself.
+
+**The root cause:**
+
+`RECENT_THRESHOLD = timedelta(hours=24)` in `services/feed_service.py` defines the window used to decide whether a friend's listening event counts as "currently listening." For a feature named "Friends Listening Now," a 24-hour window is far too generous — any listen from up to a full day ago is reported as happening "now." The comparison logic (`listened_at >= cutoff`) is correct; the constant it's built on is not.
+
+**My fix and side-effect check:**
+
+Changed `RECENT_THRESHOLD` from `timedelta(hours=24)` to `timedelta(minutes=30)`, matching the boundary implied by `seed_data.py`'s own comments (`30 minutes` = should show, `2+ hours` = should not). Verified with `repro_issue2.py` using two separate friends: one with only a 10-hour-old event (now correctly excluded) and one with only a 15-minute-old event (still correctly included):
+
+```
+Returned 1 result(s):
+  - friend=friend_recent, listened_at=2026-07-06T21:15:48.181348
+```
+Ran the full test suite (`pytest tests/ -v`) — all tests pass; RECENT_THRESHOLD is only used by get_friends_listening_now, so `get_activity_feed` (which is explicitly not recency-filtered, per its own docstring) is unaffected.
